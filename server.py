@@ -13,13 +13,17 @@ import logging
 import math
 import os
 import secrets
+import shutil
+import socket
 import sqlite3
 import ssl
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote_plus, urlparse
@@ -27,14 +31,36 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from cryptography.hazmat.primitives import padding as sym_padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-ROOT = Path(__file__).resolve().parent
-DB_PATH = ROOT / "history.sqlite"
-SECRET_PATH = ROOT / "secret.txt"
-CONFIG_PATH = ROOT / "config.json"
-LOG_PATH = ROOT / "server.log"
+
+def _bundle_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    return Path(__file__).resolve().parent
+
+
+def _data_dir() -> Path:
+    override = os.environ.get("DECOMONITOR_DATA")
+    if override:
+        return Path(override)
+    if getattr(sys, "frozen", False):
+        return Path(os.environ.get("PROGRAMDATA") or r"C:\ProgramData") / "DecoMonitor"
+    return Path(__file__).resolve().parent
+
+
+BUNDLE = _bundle_dir()
+DATA = _data_dir()
+DATA.mkdir(parents=True, exist_ok=True)
+DB_PATH = DATA / "history.sqlite"
+SECRET_PATH = DATA / "secret.txt"
+CONFIG_PATH = DATA / "config.json"
+LOG_PATH = DATA / "server.log"
 HOST = "127.0.0.1"
-PORT = 8787
+try:
+    PORT = int(os.environ.get("DECOMONITOR_PORT") or "8787")
+except ValueError:
+    PORT = 8787
 DECO_HOST = "192.168.68.1"
+TASK_NAME = "DecoMonitor"
 
 RANGES = {"1h": 3600, "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
 BUCKETS = {"1h": 10, "24h": 300, "7d": 900, "30d": 3600}
@@ -1438,6 +1464,27 @@ class Service:
     def needs_password(self) -> bool:
         return not self.password
 
+    def set_host(self, host: str) -> None:
+        host = host.strip()
+        if "://" in host:
+            host = host.split("://", 1)[1]
+        host = host.split("/")[0].strip()
+        if not host:
+            raise DecoError("Enter the Deco address")
+        self.host = host
+        data: dict = {}
+        if CONFIG_PATH.exists():
+            try:
+                data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data["host"] = host
+        data.setdefault("username", self.username)
+        CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self._client = None
+
     def set_password(self, password: str) -> None:
         password = password
         if not password:
@@ -1471,6 +1518,7 @@ class Service:
             "device_count": len(live["devices"]),
             "counters": self.store.meta_get("counters_ok") == "1",
             "speed_unit": self.speed_unit,
+            "host": self.host,
             "zero_streak": self.zero_streak,
             **live,
         }
@@ -1655,7 +1703,7 @@ def _lock_secret() -> None:
         log.exception("could not lock secret.txt")
 
 
-SERVICE = Service()
+SERVICE: Service | None = None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1667,7 +1715,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            body = (ROOT / "index.html").read_bytes()
+            body = (BUNDLE / "index.html").read_bytes()
             self._send(200, "text/html; charset=utf-8", body)
             return
         if parsed.path == "/api/live":
@@ -1711,6 +1759,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if parsed.path == "/api/login":
+                host = str(payload.get("host") or "").strip()
+                if host:
+                    SERVICE.set_host(host)
                 SERVICE.set_password(str(payload.get("password") or ""))
                 self._send_json({"ok": True})
                 return
@@ -1736,7 +1787,235 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def main() -> None:
+def _message(text: str, error: bool = False) -> None:
+    if os.name != "nt":
+        print(text, file=sys.stderr if error else sys.stdout)
+        return
+    import ctypes
+
+    ctypes.windll.user32.MessageBoxW(None, text, "DecoMonitor", 0x10 if error else 0x40)
+
+
+def _port_free(port: int) -> bool:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((HOST, port))
+    except OSError:
+        return False
+    finally:
+        probe.close()
+    return True
+
+
+def _task_xml(executable: Path) -> str:
+    command = str(executable)
+    work = str(executable.parent)
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <URI>\\{TASK_NAME}</URI>
+  </RegistrationInfo>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+      <LogonType>InteractiveToken</LogonType>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <DisallowStartOnRemoteAppSession>false</DisallowStartOnRemoteAppSession>
+    <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+    <IdleSettings>
+      <Duration>PT10M</Duration>
+      <WaitTimeout>PT1H</WaitTimeout>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+  </Settings>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+  </Triggers>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{command}</Command>
+      <Arguments>--service</Arguments>
+      <WorkingDirectory>{work}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def _run_schtasks(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["schtasks", *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _installed_exe_running(executable: Path) -> bool:
+    if os.name != "nt" or not executable.exists():
+        return False
+    safe = str(executable).replace("'", "''")
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            (
+                f"$target = '{safe}'; "
+                "$hit = Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $target }; "
+                "if ($hit) { 'yes' }"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return "yes" in (result.stdout or "")
+
+
+def _stop_installed_exe(executable: Path) -> None:
+    if os.name != "nt" or not executable.exists():
+        return
+    safe = str(executable).replace("'", "''")
+    subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            (
+                f"$target = '{safe}'; "
+                "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $target } | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _register_boot_task(executable: Path) -> None:
+    xml_path = DATA / "task.xml"
+    xml_path.write_text(_task_xml(executable), encoding="utf-16")
+    try:
+        result = _run_schtasks(["/Create", "/TN", TASK_NAME, "/XML", str(xml_path), "/F"])
+    finally:
+        xml_path.unlink(missing_ok=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "schtasks failed").strip()
+        raise DecoError(detail)
+
+
+def _wait_for_dashboard(timeout: float = 40) -> bool:
+    deadline = time.time() + timeout
+    url = f"http://{HOST}:{PORT}/"
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=1):
+                return True
+        except Exception:
+            time.sleep(0.4)
+    return False
+
+
+def install_windows() -> None:
+    import ctypes
+
+    if not ctypes.windll.shell32.IsUserAnAdmin():
+        _message("Approve the administrator prompt so DecoMonitor can record from boot.", error=True)
+        return
+    target = DATA / "DecoMonitor.exe"
+    if not _port_free(PORT) and not _installed_exe_running(target):
+        webbrowser.open(f"http://{HOST}:{PORT}/")
+        _message(
+            "Port 8787 is already in use, so this copy was not installed over it. "
+            "The existing dashboard was opened."
+        )
+        return
+    DATA.mkdir(parents=True, exist_ok=True)
+    source = Path(sys.executable)
+    _run_schtasks(["/End", "/TN", TASK_NAME])
+    _stop_installed_exe(target)
+    if source.resolve() != target.resolve():
+        last_error = ""
+        for _ in range(10):
+            try:
+                shutil.copy2(source, target)
+                last_error = ""
+                break
+            except OSError as exc:
+                last_error = str(exc)
+                time.sleep(0.4)
+        if last_error:
+            _message(f"Could not install DecoMonitor.exe: {last_error}", error=True)
+            return
+    try:
+        _register_boot_task(target)
+    except DecoError as exc:
+        _message(str(exc), error=True)
+        return
+    _run_schtasks(["/Run", "/TN", TASK_NAME])
+    if not _wait_for_dashboard():
+        _message(
+            "DecoMonitor is installed, but the dashboard did not answer yet. "
+            f"See {LOG_PATH}",
+            error=True,
+        )
+        return
+    webbrowser.open(f"http://{HOST}:{PORT}/")
+    _message(
+        "DecoMonitor will record from each boot, before anyone logs on.\n\n"
+        "The dashboard is http://127.0.0.1:8787/"
+    )
+
+
+def uninstall_windows() -> None:
+    import ctypes
+
+    if not ctypes.windll.shell32.IsUserAnAdmin():
+        _message("Approve the administrator prompt to remove the startup task.", error=True)
+        return
+    target = DATA / "DecoMonitor.exe"
+    _run_schtasks(["/End", "/TN", TASK_NAME])
+    _stop_installed_exe(target)
+    _run_schtasks(["/Delete", "/TN", TASK_NAME, "/F"])
+    try:
+        target.unlink()
+    except OSError:
+        pass
+    _message(f"Startup task removed. Saved data remains in {DATA}")
+
+
+def run_server() -> None:
+    global SERVICE
+    SERVICE = Service()
     threading.Thread(target=SERVICE.loop, name="poller", daemon=True).start()
     try:
         server = ThreadingHTTPServer((HOST, PORT), Handler)
@@ -1747,5 +2026,19 @@ def main() -> None:
     server.serve_forever()
 
 
+def main() -> None:
+    if getattr(sys, "frozen", False) and "--service" not in sys.argv:
+        if "--uninstall" in sys.argv:
+            uninstall_windows()
+        else:
+            install_windows()
+        return
+    run_server()
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        log.exception("DecoMonitor stopped")
+        raise

@@ -65,7 +65,7 @@
   .login { max-width: 460px; }
   .login p { color: var(--muted); }
   label { display: block; margin: 12px 0 6px; color: var(--muted); }
-  input[type="password"] { width: 100%; padding: 10px 12px; }
+  input[type="password"], input[type="text"] { width: 100%; padding: 10px 12px; }
   .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
   .primary { background: var(--down); border-color: transparent; color: #06101c; font-weight: 650; }
   .live-grid, .hist-head { display: grid; gap: 12px; }
@@ -153,9 +153,11 @@
   <div class="banner" id="banner"></div>
   <section class="card login" id="login" hidden>
     <h2>Owner TP-Link ID password</h2>
-    <p>This is the password for the owner TP-Link ID, the same one <code>192.168.68.1</code> asks for. It is not the Wi-Fi password, and it is not your Google password. Signing in to the Deco app with Google does not create this password.</p>
+    <p>This is the password for the owner TP-Link ID, the same one the Deco’s own page asks for. It is not the Wi-Fi password, and it is not your Google password. Signing in to the Deco app with Google does not create this password.</p>
     <p>To create one: open the Deco app, log out, and on the sign-in screen tap Forgot password. Use the email address behind the Google sign-in, not Continue with Google. Set a password from the email TP-Link sends, then enter that password here. A wrong password uses one of the router’s login attempts. The password stays in a file on this PC.</p>
     <form id="login-form">
+      <label for="deco-host">Deco address</label>
+      <input id="deco-host" type="text" value="192.168.68.1" autocomplete="off" required spellcheck="false">
       <label for="password">Password</label>
       <input id="password" type="password" autocomplete="current-password" required>
       <div class="row">
@@ -672,6 +674,8 @@ function renderLive() {
   if (!live) return;
   $("login").hidden = !live.needs_password;
   $("dash").hidden = !!live.needs_password;
+  const hostInput = $("deco-host");
+  if (hostInput && live.host && document.activeElement !== hostInput) hostInput.value = live.host;
   const status = $("status");
   if (live.needs_password) {
     status.textContent = "Waiting for the Deco password.";
@@ -826,7 +830,7 @@ $("login-form").addEventListener("submit", async (event) => {
   const res = await fetch("/api/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password: $("password").value }),
+    body: JSON.stringify({ password: $("password").value, host: $("deco-host").value }),
   });
   const body = await res.json();
   if (!body.ok) {
