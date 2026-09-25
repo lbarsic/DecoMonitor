@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bandwidth Monitor</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #10141a;
+    --card: #181e27;
+    --line: #2c3644;
+    --text: #e8eef6;
+    --muted: #8b98a8;
+    --down: #4c9aff;
+    --up: #e3a008;
+    --bad: #ff6b6b;
+    --ok: #3dd68c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 "Segoe UI", sans-serif;
+  }
+  header, main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
+  header > div:first-child { min-width: 0; flex: 1; }
+  header {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: end;
+    padding: 22px 0 8px;
+  }
+  h1 { font-size: 22px; font-weight: 650; margin: 0; }
+  .sub { color: var(--muted); margin-top: 4px; }
+  .unit { color: var(--muted); font-size: 13px; }
+  select, button, input {
+    font: inherit;
+    color: var(--text);
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  select, button { padding: 6px 10px; }
+  button { cursor: pointer; }
+  button.active { border-color: var(--down); color: white; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 14px 16px 16px;
+    margin: 12px 0;
+  }
+  .banner {
+    display: none;
+    background: #3a1d22;
+    border: 1px solid #7a3038;
+    color: #ffd0d0;
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-top: 12px;
+  }
+  .login { max-width: 460px; }
+  .login p { color: var(--muted); }
+  label { display: block; margin: 12px 0 6px; color: var(--muted); }
+  input[type="password"] { width: 100%; padding: 10px 12px; }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+  .primary { background: var(--down); border-color: transparent; color: #06101c; font-weight: 650; }
+  .live-grid, .hist-head { display: grid; gap: 12px; }
+  .live-grid { grid-template-columns: 1fr 1fr; }
+  .figure { min-width: 0; }
+  .figure h2, .hist-head h2 { margin: 0; font-size: 14px; font-weight: 600; color: var(--muted); }
+  .big { font-size: 32px; font-variant-numeric: tabular-nums; margin: 4px 0 8px; }
+  .big span { font-size: 14px; color: var(--muted); margin-left: 4px; }
+  canvas.chart { width: 100%; height: 180px; display: block; }
+  canvas.tall { height: 260px; }
+  .tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .totals { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; display: inline-flex; align-items: center; }
+  html { overflow-anchor: none; }
+  .table-wrap { overflow-x: auto; overflow-y: hidden; overflow-anchor: none; }
+  #status { display: flex; flex-wrap: wrap; align-items: baseline; max-width: 100%; }
+  #status .status-lead, #status .status-node { white-space: nowrap; }
+  #status .status-node::before { content: "·"; margin: 0 0.45em; }
+  .usage-part { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .usage-part + .usage-part { margin-left: 12px; }
+  .io-icon { display: block; flex: none; }
+  .io-icon.down { color: #4c9aff; }
+  .io-icon.up { color: #e3a008; }
+  table.devices { table-layout: fixed; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; overflow: hidden; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; letter-spacing: 0.03em; position: relative; }
+  .col-resizer {
+    position: absolute;
+    top: 0;
+    right: -3px;
+    width: 7px;
+    height: 100%;
+    cursor: col-resize;
+    z-index: 2;
+  }
+  th button {
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    font-weight: inherit;
+    padding: 0;
+    cursor: pointer;
+  }
+  th button.active { color: var(--text); }
+  th.num button { width: 100%; text-align: right; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr { cursor: pointer; }
+  tr.selected { background: #223044; }
+  .name { font-weight: 600; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .figure .meta { margin: 0 0 8px; }
+  .header-controls { display: flex; gap: 10px; align-items: center; }
+  #clear-data { color: #ffb4b4; border-color: #5a3036; }
+  .unit-pick { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; align-self: center; }
+  .unit-pick button { border: 0; border-radius: 0; background: transparent; color: var(--muted); padding: 7px 12px; }
+  .unit-pick button.active { background: #243044; color: white; }
+  canvas.spark { width: 100%; height: 32px; display: block; }
+  .device-line { display: flex; align-items: center; min-width: 0; }
+  .device-line .name, .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .dot { width: 8px; height: 8px; border-radius: 99px; flex: none; margin-right: 8px; }
+  .empty { color: var(--muted); padding: 18px 8px; }
+  @media (max-width: 800px) {
+    .live-grid { grid-template-columns: 1fr; }
+    header { flex-direction: column; align-items: start; }
+    .totals { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Bandwidth Monitor</h1>
+    <div class="sub" id="status">Connecting to the Deco…</div>
+  </div>
+  <div class="header-controls">
+    <button type="button" id="clear-data">Clear data</button>
+    <div class="unit-pick" role="group" aria-label="Speed unit">
+      <button type="button" data-unit="bytes">MB/s</button>
+      <button type="button" data-unit="bits">Mbps</button>
+    </div>
+  </div>
+</header>
+<main>
+  <div class="banner" id="banner"></div>
+  <section class="card login" id="login" hidden>
+    <h2>Owner TP-Link ID password</h2>
+    <p>This is the password for the owner TP-Link ID, the same one <code>192.168.68.1</code> asks for. It is not the Wi-Fi password, and it is not your Google password. Signing in to the Deco app with Google does not create this password.</p>
+    <p>To create one: open the Deco app, log out, and on the sign-in screen tap Forgot password. Use the email address behind the Google sign-in, not Continue with Google. Set a password from the email TP-Link sends, then enter that password here. A wrong password uses one of the router’s login attempts. The password stays in a file on this PC.</p>
+    <form id="login-form">
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+      <div class="row">
+        <button class="primary" type="submit">Save and start</button>
+        <span id="login-msg" class="meta"></span>
+      </div>
+    </form>
+  </section>
+  <section id="dash">
+    <div class="live-grid">
+      <div class="card figure">
+        <h2>Network Download</h2>
+        <div class="big" id="down-now">—</div>
+        <canvas class="chart" id="down-chart"></canvas>
+      </div>
+      <div class="card figure">
+        <h2>Network Upload</h2>
+        <div class="big" id="up-now">—</div>
+        <canvas class="chart" id="up-chart"></canvas>
+      </div>
+    </div>
+    <section class="card">
+      <div class="hist-head">
+        <div class="tools">
+          <h2 id="hist-title">All devices</h2>
+          <button type="button" id="show-all" class="active">All devices</button>
+          <button type="button" data-range="1h" class="active">1 hour</button>
+          <button type="button" data-range="24h">24 hours</button>
+          <button type="button" data-range="7d">7 days</button>
+          <button type="button" data-range="30d">30 days</button>
+          <button type="button" id="stack-dir">Showing download</button>
+          <div class="totals" id="totals"></div>
+        </div>
+      </div>
+      <canvas class="chart tall" id="hist-chart"></canvas>
+    </section>
+    <section class="card">
+      <div class="tools" style="margin-bottom: 10px;">
+        <span class="meta">Usage</span>
+        <div class="unit-pick" role="group" aria-label="Usage period">
+          <button type="button" data-usage="today">Today</button>
+          <button type="button" data-usage="week">This week</button>
+          <button type="button" data-usage="month">This month</button>
+          <button type="button" data-usage="all">All time</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+      <table class="devices" id="devices">
+        <colgroup>
+          <col data-col="device">
+          <col data-col="node">
+          <col data-col="band">
+          <col data-col="down">
+          <col data-col="up">
+          <col data-col="min10">
+          <col data-col="hour">
+          <col data-col="usage">
+        </colgroup>
+        <thead>
+          <tr>
+            <th><button type="button" data-sort="device">Device</button><span class="col-resizer" data-col="device"></span></th>
+            <th><button type="button" data-sort="node">Node</button><span class="col-resizer" data-col="node"></span></th>
+            <th><button type="button" data-sort="band">Band</button><span class="col-resizer" data-col="band"></span></th>
+            <th class="num"><button type="button" data-sort="down">Down</button><span class="col-resizer" data-col="down"></span></th>
+            <th class="num"><button type="button" data-sort="up">Up</button><span class="col-resizer" data-col="up"></span></th>
+            <th><button type="button" data-sort="median" title="Median of download plus upload over the last 10 minutes">Last 10 min</button><span class="col-resizer" data-col="min10"></span></th>
+            <th><button type="button" data-sort="hour" title="Median of download plus upload over the last hour">Last hour</button><span class="col-resizer" data-col="hour"></span></th>
+            <th><button type="button" data-sort="usage" title="Download and upload for the selected period, in GB">Usage</button><span class="col-resizer" data-col="usage"></span></th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      </div>
+      <div class="empty" id="empty" hidden>No devices are online.</div>
+    </section>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let range = "1h";
+let selected = null;
+let sortKey = "down";
+let sortDir = -1;
+let usagePeriod = localStorage.getItem("bw-usage") || "today";
+if (!["today", "week", "month", "all"].includes(usagePeriod)) usagePeriod = "today";
+let stackUpload = false;
+let lastLive = null;
+let lastHist = null;
+let unitMode = localStorage.getItem("bw-unit") === "bits" ? "bits" : "bytes";
+const queryUnit = new URLSearchParams(location.search).get("unit");
+if (queryUnit === "bits" || queryUnit === "bytes") unitMode = queryUnit;
+
+const PALETTE = ["#4c9aff", "#e3a008", "#3dd68c", "#f07178", "#c792ea", "#ff9f43", "#82aaff", "#ff6b9d", "#7fdbca", "#f78c6c", "#c3e88d", "#89ddff"];
+function colorFor(mac) {
+  let h = 2166136261;
+  for (const c of mac) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
+  return PALETTE[(h >>> 0) % PALETTE.length];
+}
+function trimNum(v) {
+  if (!v) return "0";
+  const a = Math.abs(v);
+  if (a >= 100) return v.toFixed(0);
+  if (a >= 10) return v.toFixed(1);
+  return v.toFixed(2);
+}
+function axisFor(maxMbps) {
+  const peak = Math.abs(maxMbps) || 0;
+  if (unitMode === "bytes") {
+    const kib = peak * 1e6 / 8 / 1024;
+    if (kib < 1024) return { label: "KB/s", convert: (m) => m * 1e6 / 8 / 1024 };
+    return { label: "MB/s", convert: (m) => m * 1e6 / 8 / (1024 * 1024) };
+  }
+  if (peak < 1) return { label: "kbps", convert: (m) => m * 1000 };
+  return { label: "Mbps", convert: (m) => m };
+}
+function formatRate(mbps) {
+  if (mbps == null || Number.isNaN(mbps)) return "—";
+  const axis = axisFor(mbps);
+  return trimNum(axis.convert(mbps)) + " " + axis.label;
+}
+function setRate(el, mbps) {
+  el.replaceChildren();
+  if (mbps == null || Number.isNaN(mbps)) {
+    el.textContent = "—";
+    return;
+  }
+  const axis = axisFor(mbps);
+  el.append(trimNum(axis.convert(mbps)) + " ");
+  const unit = document.createElement("span");
+  unit.textContent = axis.label;
+  el.append(unit);
+}
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1e6) return (n / 1e3).toFixed(0) + " KB";
+  if (n < 1e9) return (n / 1e6).toFixed(1) + " MB";
+  return (n / 1e9).toFixed(2) + " GB";
+}
+function fmtTickNum(v) {
+  const n = Math.abs(v);
+  if (n >= 100 || Math.abs(v - Math.round(v)) < 1e-6) return String(Math.round(v));
+  if (Math.abs(v * 10 - Math.round(v * 10)) < 1e-6) return v.toFixed(1);
+  return v.toFixed(2);
+}
+function yScale(peak) {
+  const max = Math.max(peak || 0, 0);
+  if (max === 0) return { top: 1, ticks: [0, 0.25, 0.5, 0.75, 1] };
+  const rough = max / 4;
+  const pow = Math.pow(10, Math.floor(Math.log10(rough)));
+  const err = rough / pow;
+  const mult = err <= 1 ? 1 : err <= 2 ? 2 : err <= 2.5 ? 2.5 : err <= 5 ? 5 : 10;
+  const step = mult * pow;
+  const top = Math.max(step, Math.ceil((max - 1e-9) / step) * step);
+  const ticks = [];
+  for (let i = 0; i * step <= top + step * 1e-6; i++) {
+    ticks.push(Math.round(i * step * 1e6) / 1e6);
+  }
+  return { top, ticks };
+}
+function fmtClock(ts) {
+  return new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+function fmtDay(ts) {
+  return new Date(ts * 1000).toLocaleDateString([], { month: "short", day: "numeric" });
+}
+function localMarks(t0, t1, hours) {
+  const marks = [];
+  const cursor = new Date(t0 * 1000);
+  cursor.setHours(0, 0, 0, 0);
+  cursor.setDate(cursor.getDate() - 1);
+  const end = t1 + 86400;
+  for (; cursor.getTime() / 1000 <= end; cursor.setDate(cursor.getDate() + 1)) {
+    for (const hour of hours) {
+      const mark = new Date(cursor);
+      mark.setHours(hour, 0, 0, 0);
+      const ts = Math.floor(mark.getTime() / 1000);
+      if (ts >= t0 && ts <= t1) marks.push(ts);
+    }
+  }
+  return marks;
+}
+function xTicks(t0, t1) {
+  const span = t1 - t0;
+  let times = [];
+  let label = (ts) => fmtClock(ts);
+  if (span <= 20 * 60) {
+    const step = span <= 8 * 60 ? 60 : 120;
+    for (let t = Math.ceil(t0 / step) * step; t <= t1; t += step) times.push(t);
+  } else if (span <= 3 * 3600) {
+    const step = span <= 3600 ? 10 * 60 : 15 * 60;
+    for (let t = Math.ceil(t0 / step) * step; t <= t1; t += step) times.push(t);
+  } else if (span <= 36 * 3600) {
+    times = localMarks(t0, t1, [0, 6, 12, 18]);
+    label = (ts) => {
+      const d = new Date(ts * 1000);
+      return d.getHours() === 0 ? fmtDay(ts) : fmtClock(ts);
+    };
+  } else if (span <= 10 * 86400) {
+    times = localMarks(t0, t1, [0, 12]);
+    label = (ts) => (new Date(ts * 1000).getHours() === 0 ? fmtDay(ts) : "12:00");
+  } else {
+    times = localMarks(t0, t1, [0]);
+    label = (ts) => fmtDay(ts);
+  }
+  return times.map((ts) => ({ ts, label: label(ts) }));
+}
+function drawAxes(ctx, xOf, yOf, t0, t1, y, pad, w, h) {
+  ctx.strokeStyle = "#2c3644";
+  ctx.fillStyle = "#8b98a8";
+  ctx.font = "11px Segoe UI";
+  ctx.lineWidth = 1;
+  ctx.textAlign = "left";
+  for (const value of y.ticks) {
+    const py = yOf(value);
+    ctx.beginPath();
+    ctx.moveTo(pad.l, py);
+    ctx.lineTo(w - pad.r, py);
+    ctx.stroke();
+    ctx.fillText(fmtTickNum(value), 4, py + 4);
+  }
+  const ticks = xTicks(t0, t1);
+  ctx.textAlign = "center";
+  let lastX = -999;
+  for (const tick of ticks) {
+    const x = xOf(tick.ts);
+    if (x < pad.l || x > w - pad.r) continue;
+    if (x - lastX < 46) continue;
+    lastX = x;
+    ctx.beginPath();
+    ctx.moveTo(x, h - pad.b);
+    ctx.lineTo(x, h - pad.b + 4);
+    ctx.stroke();
+    ctx.fillText(tick.label, x, h - 6);
+  }
+  ctx.textAlign = "left";
+}
+function showBanner(text) {
+  const el = $("banner");
+  el.style.display = text ? "block" : "none";
+  el.textContent = text || "";
+}
+
+function drawLines(canvas, lines, spanHint) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || 300;
+  const h = canvas.clientHeight || 180;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const rawPts = lines.flatMap((line) => line.points);
+  const peak = Math.max(0, ...rawPts.map((p) => p[1]));
+  const axis = axisFor(peak);
+  const scaled = lines.map((line) => ({
+    ...line,
+    points: line.points.map(([t, v]) => [t, axis.convert(v)]),
+  }));
+  const pts = scaled.flatMap((line) => line.points);
+  if (!rawPts.length) {
+    ctx.fillStyle = "#8b98a8";
+    ctx.font = "13px Segoe UI";
+    ctx.fillText("No samples yet. This fills in as the collector runs.", 48, h / 2);
+    return;
+  }
+  let dataMax = 0;
+  for (const [, v] of pts) dataMax = Math.max(dataMax, v);
+  const y = yScale(dataMax);
+  ctx.font = "11px Segoe UI";
+  const pad = {
+    l: Math.max(36, Math.ceil(Math.max(...y.ticks.map((v) => ctx.measureText(fmtTickNum(v)).width))) + 10),
+    r: 12,
+    t: 16,
+    b: 26,
+  };
+  let t0 = Infinity, t1 = -Infinity;
+  for (const [t] of pts) {
+    t0 = Math.min(t0, t);
+    t1 = Math.max(t1, t);
+  }
+  if (spanHint >= 3600) {
+    t1 = Date.now() / 1000;
+    t0 = t1 - spanHint;
+  } else if (t1 <= t0) {
+    t1 = t0 + 1;
+  }
+  const xOf = (t) => pad.l + (t - t0) / (t1 - t0) * (w - pad.l - pad.r);
+  const yOf = (v) => pad.t + (1 - v / y.top) * (h - pad.t - pad.b);
+  drawAxes(ctx, xOf, yOf, t0, t1, y, pad, w, h);
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#8b98a8";
+  ctx.font = "11px Segoe UI";
+  ctx.fillText(axis.label, w - 8, 12);
+  ctx.textAlign = "left";
+  for (const line of scaled) {
+    if (line.points.length < 1) continue;
+    ctx.beginPath();
+    line.points.forEach(([t, v], i) => {
+      const x = xOf(t), y = yOf(v);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = line.color;
+    ctx.lineWidth = line.width || 1.8;
+    ctx.stroke();
+    if (line.fill && line.points.length > 1) {
+      const last = line.points[line.points.length - 1];
+      const first = line.points[0];
+      ctx.lineTo(xOf(last[0]), yOf(0));
+      ctx.lineTo(xOf(first[0]), yOf(0));
+      ctx.closePath();
+      ctx.fillStyle = line.fill;
+      ctx.fill();
+    }
+  }
+}
+
+function drawStack(canvas, series, spanHint) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || 300;
+  const h = canvas.clientHeight || 260;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const times = [...new Set(series.flatMap((s) => s.points.map((p) => p[0])))].sort((a, b) => a - b);
+  if (!times.length) {
+    ctx.fillStyle = "#8b98a8";
+    ctx.font = "13px Segoe UI";
+    ctx.fillText("No samples in this range yet.", 48, h / 2);
+    return;
+  }
+  let peak = 0;
+  const rawMaps = series.map((s) => new Map(s.points));
+  for (const t of times) {
+    let sum = 0;
+    for (const map of rawMaps) sum += map.get(t) || 0;
+    peak = Math.max(peak, sum);
+  }
+  const axis = axisFor(peak);
+  const maps = rawMaps.map((map) => {
+    const scaled = new Map();
+    for (const [t, v] of map) scaled.set(t, axis.convert(v));
+    return scaled;
+  });
+  const y = yScale(axis.convert(peak));
+  ctx.font = "11px Segoe UI";
+  const pad = {
+    l: Math.max(36, Math.ceil(Math.max(...y.ticks.map((v) => ctx.measureText(fmtTickNum(v)).width))) + 10),
+    r: 12,
+    t: 16,
+    b: 26,
+  };
+  let t0 = times[0];
+  let t1 = times[times.length - 1] || t0 + 1;
+  if (spanHint >= 3600) {
+    t1 = Date.now() / 1000;
+    t0 = t1 - spanHint;
+  }
+  const xOf = (t) => pad.l + (t - t0) / Math.max(1, t1 - t0) * (w - pad.l - pad.r);
+  const yOf = (v) => pad.t + (1 - v / y.top) * (h - pad.t - pad.b);
+  drawAxes(ctx, xOf, yOf, t0, t1, y, pad, w, h);
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#8b98a8";
+  ctx.font = "11px Segoe UI";
+  ctx.fillText(axis.label, w - 8, 12);
+  ctx.textAlign = "left";
+  const baseline = times.map(() => 0);
+  series.forEach((seriesItem, idx) => {
+    const map = maps[idx];
+    const top = times.map((t, i) => baseline[i] + (map.get(t) || 0));
+    ctx.beginPath();
+    times.forEach((t, i) => {
+      const x = xOf(t), y = yOf(top[i]);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    for (let i = times.length - 1; i >= 0; i--) ctx.lineTo(xOf(times[i]), yOf(baseline[i]));
+    ctx.closePath();
+    ctx.fillStyle = seriesItem.color;
+    ctx.globalAlpha = 0.85;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    for (let i = 0; i < baseline.length; i++) baseline[i] = top[i];
+  });
+}
+
+function median(values) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+function medianUsage(device) {
+  return median((device.spark || []).map((point) => (point[1] || 0) + (point[2] || 0)));
+}
+function sortValue(device) {
+  if (sortKey === "device") return (device.name || "").toLowerCase();
+  if (sortKey === "node") return (device.node || "").toLowerCase();
+  if (sortKey === "band") return (device.band || "").toLowerCase();
+  if (sortKey === "up") return device.up_mbps || 0;
+  if (sortKey === "median") return device.median10 ?? medianUsage(device);
+  if (sortKey === "hour") return device.median_hour || 0;
+  if (sortKey === "usage") {
+    const bucket = device.usage && device.usage[usagePeriod];
+    return bucket ? bucket.down_bytes || 0 : 0;
+  }
+  return device.down_mbps || 0;
+}
+function sortedDevices(devices) {
+  return [...devices].sort((a, b) => {
+    const av = sortValue(a);
+    const bv = sortValue(b);
+    const cmp = typeof av === "string" ? av.localeCompare(bv) : av - bv;
+    if (cmp) return cmp * sortDir;
+    return (a.name || "").localeCompare(b.name || "");
+  });
+}
+const SORT_LABELS = {
+  device: "Device",
+  node: "Node",
+  band: "Band",
+  down: "Down",
+  up: "Up",
+  median: "Last 10 min",
+  hour: "Last hour",
+  usage: "Usage",
+};
+function fmtGB(bytes) {
+  return ((Number(bytes) || 0) / 1e9).toFixed(2) + " GB";
+}
+function ioIcon(direction) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", "14");
+  svg.setAttribute("height", "14");
+  svg.setAttribute("aria-hidden", "true");
+  svg.classList.add("io-icon", direction);
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.6");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  path.setAttribute("d", direction === "down"
+    ? "M8 2.2v7.2M5.1 7.1 8 10.2l2.9-3.1M3.2 13.4h9.6"
+    : "M8 10.4V3.2M5.1 5.5 8 2.4l2.9 3.1M3.2 13.4h9.6");
+  svg.append(path);
+  return svg;
+}
+function fillTransfer(el, downBytes, upBytes, format) {
+  el.replaceChildren();
+  for (const [direction, bytes, label] of [
+    ["down", downBytes, "Download"],
+    ["up", upBytes, "Upload"],
+  ]) {
+    const part = document.createElement("span");
+    part.className = "usage-part";
+    part.title = label;
+    part.append(ioIcon(direction), format(bytes));
+    el.append(part);
+  }
+}
+function fillUsage(cell, device) {
+  const bucket = (device.usage && device.usage[usagePeriod]) || { down_bytes: 0, up_bytes: 0 };
+  fillTransfer(cell, bucket.down_bytes, bucket.up_bytes, fmtGB);
+}
+function keepScroll(draw) {
+  const x = window.scrollX;
+  const y = window.scrollY;
+  const wrap = document.querySelector(".table-wrap");
+  const wrapX = wrap ? wrap.scrollLeft : 0;
+  draw();
+  window.scrollTo(x, y);
+  if (wrap) wrap.scrollLeft = wrapX;
+  requestAnimationFrame(() => {
+    window.scrollTo(x, y);
+    if (wrap) wrap.scrollLeft = wrapX;
+  });
+}
+function markSortHeaders() {
+  document.querySelectorAll("[data-sort]").forEach((button) => {
+    const active = button.dataset.sort === sortKey;
+    const arrow = active ? (sortDir < 0 ? " ↓" : " ↑") : "";
+    button.textContent = SORT_LABELS[button.dataset.sort] + arrow;
+    button.classList.toggle("active", active);
+  });
+}
+function spark(canvas, points, color, widthPx) {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = "100%";
+  canvas.style.height = "32px";
+  const w = Math.max(48, widthPx || 120);
+  const h = 32;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (!points.length) return;
+  const max = Math.max(0.1, ...points.map((p) => p[1]));
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const x = points.length === 1 ? w / 2 : i / (points.length - 1) * (w - 2) + 1;
+    const y = h - 2 - (p[1] / max) * (h - 6);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
+function renderLive() {
+  const live = lastLive;
+  if (!live) return;
+  $("login").hidden = !live.needs_password;
+  $("dash").hidden = !!live.needs_password;
+  const status = $("status");
+  if (live.needs_password) {
+    status.textContent = "Waiting for the Deco password.";
+  } else if (live.error) {
+    status.textContent = "Collector problem.";
+  } else if (!live.updated) {
+    status.textContent = "Signed in. Waiting for the first sample…";
+  } else {
+    const age = Math.max(0, Math.round(Date.now() / 1000 - live.updated));
+    const fresh = age <= 1 ? "just now" : `${age}s ago`;
+    status.replaceChildren();
+    const lead = document.createElement("span");
+    lead.className = "status-lead";
+    lead.textContent = `Updated ${fresh} · ${live.device_count} online`;
+    status.append(lead);
+    for (const router of live.routers || []) {
+      const parts = [];
+      if (router.cpu != null) parts.push(`CPU ${router.cpu}%`);
+      if (router.mem != null) parts.push(`Memory ${router.mem}%`);
+      if (!parts.length) continue;
+      const node = document.createElement("span");
+      node.className = "status-node";
+      node.textContent = `${router.label} ${parts.join(" · ")}`;
+      status.append(node);
+    }
+  }
+  let banner = live.error || "";
+  showBanner(banner);
+  if (live.needs_password) return;
+  keepScroll(() => renderLiveBody(live));
+}
+function renderLiveBody(live) {
+  applyColWidths();
+  setRate($("down-now"), live.totals.down_mbps);
+  setRate($("up-now"), live.totals.up_mbps);
+  const net = live.network || [];
+  drawLines($("down-chart"), [{ color: "#4c9aff", fill: "rgba(76,154,255,0.16)", points: net.map((p) => [p[0], p[1]]) }], 300);
+  drawLines($("up-chart"), [{ color: "#e3a008", fill: "rgba(227,160,8,0.14)", points: net.map((p) => [p[0], p[2]]) }], 300);
+  const body = $("rows");
+  body.replaceChildren();
+  $("empty").hidden = live.devices.length > 0;
+  for (const device of sortedDevices(live.devices)) {
+    const tr = document.createElement("tr");
+    if (device.mac === selected) tr.className = "selected";
+    tr.dataset.mac = device.mac;
+    const name = document.createElement("td");
+    name.className = "device";
+    const line = document.createElement("div");
+    line.className = "device-line";
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    dot.style.background = colorFor(device.mac);
+    const label = document.createElement("span");
+    label.className = "name";
+    label.textContent = device.name;
+    line.append(dot, label);
+    const ip = document.createElement("div");
+    ip.className = "meta";
+    ip.textContent = device.ip || device.mac;
+    name.append(line, ip);
+    const node = document.createElement("td");
+    node.textContent = device.node || "—";
+    const band = document.createElement("td");
+    band.textContent = device.band || "—";
+    const down = document.createElement("td");
+    down.className = "num";
+    down.textContent = formatRate(device.down_mbps);
+    const up = document.createElement("td");
+    up.className = "num";
+    up.textContent = formatRate(device.up_mbps);
+    const trend = document.createElement("td");
+    const canvas = document.createElement("canvas");
+    canvas.className = "spark";
+    trend.append(canvas);
+    const hour = document.createElement("td");
+    const hourCanvas = document.createElement("canvas");
+    hourCanvas.className = "spark";
+    hour.append(hourCanvas);
+    const usage = document.createElement("td");
+    fillUsage(usage, device);
+    tr.append(name, node, band, down, up, trend, hour, usage);
+    body.append(tr);
+    const color = colorFor(device.mac);
+    spark(canvas, device.spark || [], color, (colWidths.min10 || 150) - 16);
+    spark(hourCanvas, device.hour || [], color, (colWidths.hour || 170) - 16);
+  }
+}
+
+function renderHist() {
+  const hist = lastHist;
+  const span = { "1h": 3600, "24h": 86400, "7d": 604800, "30d": 2592000 }[range];
+  if (!hist) {
+    drawLines($("hist-chart"), [], span);
+    return;
+  }
+  const mine = selected ? hist.devices.filter((d) => d.mac === selected) : hist.devices;
+  const bytes = selected && mine[0] ? mine[0] : (selected ? { down_bytes: 0, up_bytes: 0 } : hist.totals);
+  fillTransfer($("totals"), bytes.down_bytes, bytes.up_bytes, fmtBytes);
+  $("show-all").classList.toggle("active", !selected);
+  if (selected) {
+    const device = mine[0];
+    const named = lastLive && lastLive.devices.find((d) => d.mac === selected);
+    $("hist-title").textContent = (device && device.name) || (named && named.name) || "Device";
+    $("stack-dir").hidden = true;
+    drawLines($("hist-chart"), device ? [
+      { color: "#4c9aff", fill: "rgba(76,154,255,0.15)", points: device.points.map((p) => [p[0], p[1]]) },
+      { color: "#e3a008", points: device.points.map((p) => [p[0], p[2]]), width: 1.6 },
+    ] : [], span);
+    return;
+  }
+  $("hist-title").textContent = "All devices";
+  $("stack-dir").hidden = false;
+  const key = stackUpload ? 2 : 1;
+  const ranked = [...hist.devices].sort((a, b) => {
+    const av = a.points.reduce((s, p) => s + p[key], 0);
+    const bv = b.points.reduce((s, p) => s + p[key], 0);
+    return bv - av;
+  });
+  const top = ranked.slice(0, 12).map((d) => ({
+    color: colorFor(d.mac),
+    points: d.points.map((p) => [p[0], p[key]]),
+  }));
+  const rest = ranked.slice(12);
+  if (rest.length) {
+    const buckets = new Map();
+    for (const device of rest) {
+      for (const point of device.points) {
+        buckets.set(point[0], (buckets.get(point[0]) || 0) + point[key]);
+      }
+    }
+    top.push({ color: "#5c6b7c", points: [...buckets.entries()].sort((a, b) => a[0] - b[0]) });
+  }
+  drawStack($("hist-chart"), top, span);
+}
+
+async function refreshLive() {
+  const res = await fetch("/api/live");
+  lastLive = await res.json();
+  renderLive();
+}
+async function refreshHist() {
+  const query = new URLSearchParams({ range });
+  const res = await fetch("/api/history?" + query.toString());
+  lastHist = await res.json();
+  histAt = Date.now();
+  renderHist();
+}
+
+$("login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("login-msg").textContent = "Checking…";
+  const res = await fetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password: $("password").value }),
+  });
+  const body = await res.json();
+  if (!body.ok) {
+    $("login-msg").textContent = body.error || "Login failed";
+    return;
+  }
+  $("password").value = "";
+  $("login-msg").textContent = "";
+  await refreshLive();
+});
+
+function applyUsageButtons() {
+  document.querySelectorAll("[data-usage]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.usage === usagePeriod);
+  });
+}
+applyUsageButtons();
+document.querySelectorAll("[data-usage]").forEach((button) => {
+  button.addEventListener("click", () => {
+    usagePeriod = button.dataset.usage;
+    localStorage.setItem("bw-usage", usagePeriod);
+    applyUsageButtons();
+    renderLive();
+  });
+});
+function applyUnitButtons() {
+  document.querySelectorAll("[data-unit]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.unit === unitMode);
+  });
+}
+applyUnitButtons();
+document.querySelectorAll("[data-unit]").forEach((button) => {
+  button.addEventListener("click", () => {
+    unitMode = button.dataset.unit;
+    localStorage.setItem("bw-unit", unitMode);
+    applyUnitButtons();
+    renderLive();
+    renderHist();
+  });
+});
+document.querySelectorAll("[data-range]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    range = button.dataset.range;
+    document.querySelectorAll("[data-range]").forEach((el) => el.classList.toggle("active", el === button));
+    await refreshHist();
+  });
+});
+$("stack-dir").addEventListener("click", () => {
+  stackUpload = !stackUpload;
+  $("stack-dir").textContent = stackUpload ? "Showing upload" : "Showing download";
+  renderHist();
+});
+$("show-all").addEventListener("click", () => {
+  selected = null;
+  renderLive();
+  renderHist();
+});
+const COL_KEYS = ["device", "node", "band", "down", "up", "min10", "hour", "usage"];
+const COL_DEFAULTS = { device: 200, node: 70, band: 84, down: 96, up: 96, min10: 128, hour: 140, usage: 210 };
+const PREVIOUS_DEFAULTS = { device: 210, node: 78, band: 96, down: 112, up: 112, min10: 150, hour: 170, usage: 250 };
+let colWidths = { ...COL_DEFAULTS };
+let colsCustom = false;
+function sameWidths(a, b) {
+  return COL_KEYS.every((key) => Number(a[key]) === Number(b[key]));
+}
+try {
+  const savedCols = JSON.parse(localStorage.getItem("bw-cols") || "null");
+  const previous = savedCols && (sameWidths(savedCols, PREVIOUS_DEFAULTS) || sameWidths(savedCols, COL_DEFAULTS));
+  if (savedCols && !previous && COL_KEYS.every((key) => Number(savedCols[key]) >= 48 && Number(savedCols[key]) < 2000)) {
+    colsCustom = true;
+    for (const key of COL_KEYS) colWidths[key] = Number(savedCols[key]);
+  }
+} catch (err) {
+  colWidths = { ...COL_DEFAULTS };
+}
+function fittedDefaults(room) {
+  const baseSum = COL_KEYS.reduce((sum, key) => sum + COL_DEFAULTS[key], 0);
+  const target = room > 0 ? Math.min(baseSum, room) : baseSum;
+  if (target === baseSum) return { ...COL_DEFAULTS };
+  const widths = {};
+  let used = 0;
+  COL_KEYS.forEach((key, index) => {
+    if (index === COL_KEYS.length - 1) {
+      widths[key] = Math.max(48, target - used);
+    } else {
+      widths[key] = Math.max(48, Math.floor(COL_DEFAULTS[key] * target / baseSum));
+      used += widths[key];
+    }
+  });
+  return widths;
+}
+function applyColWidths() {
+  const table = $("devices");
+  const wrap = table.closest(".table-wrap");
+  const cols = table.querySelectorAll("col");
+  const room = wrap ? Math.max(0, wrap.clientWidth - 2) : 0;
+  if (!colsCustom) {
+    colWidths = fittedDefaults(room);
+  }
+  let sum = 0;
+  COL_KEYS.forEach((key, index) => {
+    const width = Math.max(48, colWidths[key]);
+    cols[index].style.width = width + "px";
+    sum += width;
+  });
+  table.style.width = sum + "px";
+  if (!wrap) return;
+  wrap.style.overflowX = sum > wrap.clientWidth + 1 ? "auto" : "hidden";
+}
+function saveColWidths() {
+  localStorage.setItem("bw-cols", JSON.stringify(colWidths));
+}
+function measureText(text, font) {
+  const probe = document.createElement("span");
+  probe.style.cssText = "position:absolute;left:-9999px;top:0;white-space:nowrap;" + font;
+  probe.textContent = text || "";
+  document.body.append(probe);
+  const width = probe.offsetWidth;
+  probe.remove();
+  return width;
+}
+function autoSizeColumn(key) {
+  const table = $("devices");
+  const index = COL_KEYS.indexOf(key);
+  const header = table.tHead.rows[0].cells[index];
+  let width = measureText(header.innerText, "font:600 12px Segoe UI,sans-serif;letter-spacing:0.03em;") + 28;
+  for (const row of table.tBodies[0].rows) {
+    const cell = row.cells[index];
+    if (!cell) continue;
+    if (cell.querySelector("canvas")) {
+      width = Math.max(width, 140);
+      continue;
+    }
+    if (cell.classList.contains("device")) {
+      const deviceName = cell.querySelector(".name");
+      const ip = cell.querySelector(".meta");
+      width = Math.max(width, measureText(deviceName ? deviceName.textContent : "", "font:600 15px Segoe UI,sans-serif;") + 48);
+      width = Math.max(width, measureText(ip ? ip.textContent : "", "font:12px Segoe UI,sans-serif;") + 28);
+      continue;
+    }
+    const lines = cell.innerText.split("\n");
+    width = Math.max(width, ...lines.map((line) => measureText(line, "font:600 15px Segoe UI,sans-serif;") + 28));
+  }
+  colsCustom = true;
+  colWidths[key] = Math.max(48, Math.min(width, 720));
+  applyColWidths();
+  saveColWidths();
+  if (lastLive) renderLive();
+}
+function setupResizers() {
+  document.querySelectorAll(".col-resizer").forEach((handle) => {
+    handle.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const key = handle.dataset.col;
+      colsCustom = true;
+      const startX = event.clientX;
+      const column = $("devices").querySelectorAll("col")[COL_KEYS.indexOf(key)];
+      const startW = column.getBoundingClientRect().width || colWidths[key];
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      function move(ev) {
+        colWidths[key] = Math.max(48, startW + ev.clientX - startX);
+        applyColWidths();
+      }
+      function up() {
+        window.removeEventListener("mousemove", move);
+        window.removeEventListener("mouseup", up);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        saveColWidths();
+        if (lastLive) renderLive();
+      }
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+    });
+    handle.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      autoSizeColumn(handle.dataset.col);
+    });
+  });
+}
+applyColWidths();
+setupResizers();
+markSortHeaders();
+document.querySelectorAll("[data-sort]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const key = button.dataset.sort;
+    if (sortKey === key) {
+      sortDir = -sortDir;
+    } else {
+      sortKey = key;
+      sortDir = key === "device" || key === "node" || key === "band" ? 1 : -1;
+    }
+    markSortHeaders();
+    renderLive();
+  });
+});
+$("clear-data").addEventListener("click", async () => {
+  if (!confirm("Clear all saved bandwidth and usage data from database? This cannot be undone.")) return;
+  const res = await fetch("/api/clear", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  const body = await res.json();
+  if (!body.ok) {
+    showBanner(body.error || "Could not clear the saved data.");
+    return;
+  }
+  selected = null;
+  lastHist = null;
+  await refreshLive();
+  await refreshHist();
+});
+$("rows").addEventListener("click", (event) => {
+  const row = event.target.closest("tr");
+  if (!row) return;
+  selected = selected === row.dataset.mac ? null : row.dataset.mac;
+  renderLive();
+  renderHist();
+});
+window.addEventListener("resize", () => {
+  applyColWidths();
+  renderLive();
+  renderHist();
+});
+
+let histAt = 0;
+async function tick() {
+  try {
+    await refreshLive();
+    if (lastLive && !lastLive.needs_password && Date.now() - histAt > 10000) {
+      histAt = Date.now();
+      await refreshHist();
+    }
+  } catch (err) {
+    showBanner("The page lost contact with the collector on this PC.");
+  }
+}
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>
