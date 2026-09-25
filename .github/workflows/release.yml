@@ -40,10 +40,12 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
           $tag = $env:DECOMONITOR_VERSION
+          $named = "dist/DecoMonitor-$tag.exe"
+          Copy-Item dist/DecoMonitor.exe $named
           gh release view $tag --repo $env:GITHUB_REPOSITORY
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag dist/DecoMonitor.exe --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title $tag --notes "Open DecoMonitor.exe and approve the administrator prompt. Installed copies download newer releases on their own."
+            gh release create $tag $named dist/DecoMonitor.exe --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title $tag --notes "Download DecoMonitor-$tag.exe. The dashboard asks before downloading or installing. Installing restarts the server."
           } else {
-            gh release upload $tag dist/DecoMonitor.exe --repo $env:GITHUB_REPOSITORY --clobber
+            gh release upload $tag $named dist/DecoMonitor.exe --repo $env:GITHUB_REPOSITORY --clobber
           }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -6,7 +6,7 @@ The Deco owner password stays in `secret.txt` on that PC. It is never sent to TP
 
 ## Windows
 
-Download [DecoMonitor.exe](https://github.com/lbarsic/DecoMonitor/releases/latest/download/DecoMonitor.exe) and open it.
+Download the latest `DecoMonitor-<version>.exe` from the [releases page](https://github.com/lbarsic/DecoMonitor/releases/latest) and open it.
 
 Approve the administrator prompt. The app is copied to `C:\ProgramData\DecoMonitor` and a startup task named `DecoMonitor` runs it at every boot, before anyone logs on. The dashboard opens at http://127.0.0.1:8787. The first page asks for the Deco address (usually `192.168.68.1`) and the owner TP-Link ID password.
 
@@ -15,12 +15,12 @@ Windows may say the file is unrecognized because it is not signed. Choose More i
 To remove the startup task later, open an elevated PowerShell and run:
 
 ```powershell
-& "$env:ProgramData\DecoMonitor\DecoMonitor.exe" --uninstall
+& (Get-ChildItem "$env:ProgramData\DecoMonitor\DecoMonitor*.exe" | Select-Object -First 1).FullName --uninstall
 ```
 
 That removes the task and leaves the saved history and password in `C:\ProgramData\DecoMonitor`.
 
-A push to `main` builds a new exe and publishes it as the latest GitHub release. Each installed copy checks that release about 30 seconds after it starts, and then about every 30 minutes. When the release is newer, the dashboard says so, downloads the exe, and restarts itself. Saved history and the password stay in place. The copy from before this updater existed has to be downloaded once by hand; after that it follows new releases on its own.
+A push to `main` builds `DecoMonitor-<version>.exe` and publishes it as the latest GitHub release. An installed copy looks for a release about 30 seconds after it starts, and then about every 12 hours. **Check for updates** looks immediately. The page reports a newer release and waits. **Download update** asks before downloading. **Install update** asks again and warns that the server will restart. Saved history and the password stay in place. Replacing the running program cannot be done without that restart.
 
 ## Linux
 

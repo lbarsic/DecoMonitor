@@ -1422,6 +1422,7 @@ class Service:
         self._client: DecoClient | None = None
         self._wake = threading.Event()
         self.interval = 1
+        self.paused = False
         self.last_error = ""
         self.last_ok = 0
         self.cpu: float | None = None
@@ -1508,6 +1509,10 @@ class Service:
         with self._lock:
             self.store.close()
 
+    def set_paused(self, paused: bool) -> None:
+        self.paused = paused
+        self._wake.set()
+
     def status(self) -> dict:
         live = self.store.live() if not self.needs_password() else {
             "totals": {"down_mbps": 0, "up_mbps": 0, "down_deco": "0 KB/s", "up_deco": "0 KB/s"},
@@ -1529,6 +1534,7 @@ class Service:
             "host": self.host,
             "zero_streak": self.zero_streak,
             "update": update_status(),
+            "server_running": not self.paused,
             **live,
         }
 
@@ -1636,6 +1642,8 @@ class Service:
     def _slow_loop(self) -> None:
         while True:
             time.sleep(5)
+            if self.paused:
+                continue
             try:
                 self.poll_slow()
             except DecoError as exc:
@@ -1648,6 +1656,10 @@ class Service:
         threading.Thread(target=self._slow_loop, name="deco-slow", daemon=True).start()
         while True:
             started = time.time()
+            if self.paused:
+                self._wake.wait(self.interval)
+                self._wake.clear()
+                continue
             try:
                 self.poll_speeds()
             except DecoError as exc:
@@ -1767,8 +1779,24 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "Expected JSON"}, 400)
             return
         try:
-            if parsed.path == "/api/update":
-                threading.Thread(target=lambda: check_for_update(apply=True), name="update-now", daemon=True).start()
+            if parsed.path == "/api/server":
+                action = str(payload.get("action") or "")
+                if action not in {"start", "stop"}:
+                    self._send_json({"ok": False, "error": "Expected start or stop"}, 400)
+                    return
+                SERVICE.set_paused(action == "stop")
+                self._send_json({"ok": True, "server_running": not SERVICE.paused})
+                return
+            if parsed.path == "/api/update-check":
+                threading.Thread(target=check_for_update, name="update-check", daemon=True).start()
+                self._send_json({"ok": True})
+                return
+            if parsed.path == "/api/update-download":
+                threading.Thread(target=download_update, name="update-download", daemon=True).start()
+                self._send_json({"ok": True})
+                return
+            if parsed.path == "/api/update-install":
+                threading.Thread(target=install_downloaded_update, name="update-install", daemon=True).start()
                 self._send_json({"ok": True})
                 return
             if parsed.path == "/api/login":
@@ -1964,8 +1992,10 @@ def install_windows() -> None:
     if not ctypes.windll.shell32.IsUserAnAdmin():
         _message("Approve the administrator prompt so DecoMonitor can record from boot.", error=True)
         return
-    target = DATA / "DecoMonitor.exe"
-    if not _port_free(PORT) and not _installed_exe_running(target):
+    source = Path(sys.executable)
+    target = DATA / (source.name if source.name.startswith("DecoMonitor-") else versioned_exe_name(app_version()))
+    running_copy = DATA.exists() and any(_installed_exe_running(path) for path in DATA.glob("DecoMonitor*.exe"))
+    if not _port_free(PORT) and not running_copy:
         webbrowser.open(f"http://{HOST}:{PORT}/")
         _message(
             "Port 8787 is already in use, so this copy was not installed over it. "
@@ -1973,9 +2003,9 @@ def install_windows() -> None:
         )
         return
     DATA.mkdir(parents=True, exist_ok=True)
-    source = Path(sys.executable)
     _run_schtasks(["/End", "/TN", TASK_NAME])
-    _stop_installed_exe(target)
+    for path in list(DATA.glob("DecoMonitor*.exe")):
+        _stop_installed_exe(path)
     if source.resolve() != target.resolve():
         last_error = ""
         for _ in range(10):
@@ -2015,22 +2045,23 @@ def uninstall_windows() -> None:
     if not ctypes.windll.shell32.IsUserAnAdmin():
         _message("Approve the administrator prompt to remove the startup task.", error=True)
         return
-    target = DATA / "DecoMonitor.exe"
     _run_schtasks(["/End", "/TN", TASK_NAME])
-    _stop_installed_exe(target)
+    for path in list(DATA.glob("DecoMonitor*.exe")):
+        _stop_installed_exe(path)
     _run_schtasks(["/Delete", "/TN", TASK_NAME, "/F"])
-    try:
-        target.unlink()
-    except OSError:
-        pass
+    for path in list(DATA.glob("DecoMonitor*.exe")):
+        try:
+            path.unlink()
+        except OSError:
+            pass
     _message(f"Startup task removed. Saved data remains in {DATA}")
 
 
 UPDATE_REPO = "lbarsic/DecoMonitor"
-UPDATE_CHECK_SECONDS = 30 * 60
+UPDATE_CHECK_SECONDS = 12 * 60 * 60
 UPDATE_FIRST_DELAY = 30
 _update_lock = threading.Lock()
-_update_info = {"current": "", "latest": "", "status": "", "error": ""}
+_update_info = {"current": "", "latest": "", "status": "", "error": "", "file": ""}
 _httpd: ThreadingHTTPServer | None = None
 
 
@@ -2042,9 +2073,17 @@ def app_version() -> str:
     return text or "dev"
 
 
+def versioned_exe_name(version: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in ".-_" else "-" for ch in version.strip())
+    safe = safe.strip(".-") or "dev"
+    return f"DecoMonitor-{safe}.exe"
+
+
 def update_status() -> dict:
     with _update_lock:
-        return dict(_update_info)
+        info = dict(_update_info)
+    info.pop("file", None)
+    return info
 
 
 def _github_json(url: str) -> dict:
@@ -2072,11 +2111,28 @@ def _set_update(**fields: str) -> None:
         _update_info.update(fields)
 
 
-def check_for_update(apply: bool = True) -> None:
+def _pick_asset(release: dict, latest: str) -> dict | None:
+    assets = [item for item in release.get("assets") or [] if isinstance(item, dict)]
+    wanted = versioned_exe_name(latest)
+    for item in assets:
+        if item.get("name") == wanted:
+            return item
+    for item in assets:
+        if item.get("name") == "DecoMonitor.exe":
+            return item
+    return None
+
+
+def check_for_update() -> None:
     if not getattr(sys, "frozen", False):
+        _set_update(
+            status="source",
+            error="This PC runs the development server. Release updates install on the downloaded app.",
+        )
         return
     current = app_version()
     if not current or current == "dev":
+        _set_update(status="source", error="This copy has no release version to compare.")
         return
     with _update_lock:
         if _update_info["status"] in {"downloading", "restarting"}:
@@ -2091,40 +2147,52 @@ def check_for_update(apply: bool = True) -> None:
     latest = str(release.get("tag_name") or "")
     _set_update(current=current, latest=latest, error="")
     if not latest or latest == current:
-        _set_update(status="")
+        _set_update(status="uptodate", file="")
         return
-    if not apply:
-        _set_update(status="available")
+    with _update_lock:
+        if _update_info["status"] == "downloaded" and _update_info.get("latest") == latest and _update_info.get("file"):
+            return
+    _set_update(status="available", file="")
+
+
+def download_update() -> None:
+    if not getattr(sys, "frozen", False):
+        check_for_update()
         return
     with _update_lock:
         if _update_info["status"] in {"downloading", "restarting"}:
             return
         _update_info["status"] = "downloading"
-        _update_info["latest"] = latest
         _update_info["error"] = ""
-    _download_and_apply(release)
-
-
-def _download_and_apply(release: dict) -> None:
-    asset = next(
-        (item for item in release.get("assets") or [] if item.get("name") == "DecoMonitor.exe"),
-        None,
-    )
+    try:
+        release = _github_json(f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest")
+    except Exception as exc:
+        log.warning("update download failed: %s", exc)
+        _set_update(status="error", error="Could not reach GitHub to download the update.")
+        return
+    latest = str(release.get("tag_name") or "")
+    current = app_version()
+    if not latest or latest == current:
+        _set_update(status="uptodate", latest=latest, current=current, file="")
+        return
+    asset = _pick_asset(release, latest)
     if not asset:
-        _set_update(status="error", error="The latest GitHub release has no DecoMonitor.exe.")
+        _set_update(status="error", latest=latest, error="The latest GitHub release has no DecoMonitor exe.")
         return
     url = str(asset.get("browser_download_url") or "")
     if not _allowed_download(url):
         _set_update(status="error", error="The update download address was not on GitHub.")
         return
-    dest = DATA / "DecoMonitor-update.exe"
-    partial = DATA / "DecoMonitor-update.exe.part"
-    _set_update(status="downloading", error="")
+    dest = DATA / versioned_exe_name(latest)
+    partial = dest.with_name(dest.name + ".part")
     digest = str(asset.get("digest") or "")
     hasher = hashlib.sha256()
     size = 0
     try:
-        request = urllib.request.Request(url, headers={"User-Agent": "DecoMonitor", "Accept": "application/octet-stream"})
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "DecoMonitor", "Accept": "application/octet-stream"},
+        )
         with urllib.request.urlopen(request, timeout=300) as response, partial.open("wb") as handle:
             while True:
                 chunk = response.read(256 * 1024)
@@ -2142,15 +2210,26 @@ def _download_and_apply(release: dict) -> None:
     except Exception as exc:
         log.warning("update download failed: %s", exc)
         partial.unlink(missing_ok=True)
-        _set_update(status="error", error="The update download failed. It will be tried again later.")
+        _set_update(status="error", error="The update download failed.")
         return
-    _set_update(status="restarting", error="")
+    _set_update(status="downloaded", latest=latest, current=current, file=str(dest), error="")
+
+
+def install_downloaded_update() -> None:
+    if not getattr(sys, "frozen", False):
+        check_for_update()
+        return
+    with _update_lock:
+        path = _update_info.get("file") or ""
+        ready = _update_info["status"] == "downloaded" and bool(path) and Path(path).exists()
+        if ready:
+            _update_info["status"] = "restarting"
+            _update_info["error"] = ""
+    if not ready:
+        _set_update(status="error", error="Download the update before installing it.")
+        return
     flags = 0x00000008 | 0x00000200 | 0x08000000
-    subprocess.Popen(
-        [str(dest), "--apply-update"],
-        creationflags=flags,
-        close_fds=True,
-    )
+    subprocess.Popen([path, "--apply-update"], creationflags=flags, close_fds=True)
     threading.Thread(target=_stop_for_update, name="update-stop", daemon=True).start()
 
 
@@ -2160,24 +2239,40 @@ def _stop_for_update() -> None:
         _httpd.shutdown()
 
 
+def _remove_other_exes(keep: Path) -> None:
+    if not DATA.exists():
+        return
+    for path in DATA.glob("DecoMonitor*.exe"):
+        if path.resolve() == keep.resolve() or path.name.endswith(".part"):
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            log.warning("could not remove old exe %s", path.name)
+
+
 def apply_update() -> None:
     if not getattr(sys, "frozen", False):
         return
-    source = Path(sys.executable)
-    target = DATA / "DecoMonitor.exe"
-    copied = False
+    source = Path(sys.executable).resolve()
+    target = source if source.parent == DATA.resolve() else DATA / source.name
+    if source != target.resolve():
+        try:
+            shutil.copy2(source, target)
+        except OSError as exc:
+            log.error("update could not copy the new exe: %s", exc)
+            return
+        target = target.resolve()
+    try:
+        _register_boot_task(target)
+    except DecoError as exc:
+        log.error("update could not register the startup task: %s", exc)
+        return
     for _ in range(60):
         if _port_free(PORT):
-            try:
-                shutil.copy2(source, target)
-                copied = True
-                break
-            except OSError:
-                pass
+            break
         time.sleep(0.5)
-    if not copied:
-        log.error("update could not replace %s", target)
-        return
+    _remove_other_exes(target)
     _run_schtasks(["/End", "/TN", TASK_NAME])
     _run_schtasks(["/Run", "/TN", TASK_NAME])
 
@@ -2186,7 +2281,7 @@ def _update_loop() -> None:
     time.sleep(UPDATE_FIRST_DELAY)
     while True:
         try:
-            check_for_update(apply=True)
+            check_for_update()
         except Exception:
             log.exception("update check failed")
         for _ in range(UPDATE_CHECK_SECONDS):

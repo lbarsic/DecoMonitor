@@ -72,6 +72,9 @@
   .live-grid { grid-template-columns: 1fr 1fr; }
   .figure { min-width: 0; }
   .figure h2, .hist-head h2 { margin: 0; font-size: 14px; font-weight: 600; color: var(--muted); }
+  .figure-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  button.min-graph { padding: 2px 8px; font-size: 12px; }
+  .figure.minimized canvas.chart, #hist-card.minimized canvas.chart { display: none; }
   .big { font-size: 32px; font-variant-numeric: tabular-nums; margin: 4px 0 8px; }
   .big span { font-size: 14px; color: var(--muted); margin-left: 4px; }
   canvas.chart { width: 100%; height: 180px; display: block; }
@@ -118,7 +121,7 @@
   .name { font-weight: 600; }
   .meta { color: var(--muted); font-size: 12px; }
   .figure .meta { margin: 0 0 8px; }
-  .header-controls { display: flex; gap: 10px; align-items: center; }
+  .header-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
   #clear-data { color: #ffb4b4; border-color: #5a3036; }
   .unit-pick { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; align-self: center; }
   .unit-pick button { border: 0; border-radius: 0; background: transparent; color: var(--muted); padding: 7px 12px; }
@@ -142,6 +145,10 @@
     <div class="sub" id="status">Connecting to the Deco…</div>
   </div>
   <div class="header-controls">
+    <button type="button" id="server-stop">Stop server</button>
+    <button type="button" id="server-start" hidden>Start server</button>
+    <button type="button" id="check-update">Check for updates</button>
+    <button type="button" id="download-update" hidden>Download update</button>
     <button type="button" id="install-update" hidden>Install update</button>
     <button type="button" id="clear-data">Clear data</button>
     <div class="unit-pick" role="group" aria-label="Speed unit">
@@ -169,21 +176,28 @@
   </section>
   <section id="dash">
     <div class="live-grid">
-      <div class="card figure">
-        <h2>Network Download</h2>
+      <div class="card figure" id="down-card">
+        <div class="figure-head">
+          <h2>Network Download</h2>
+          <button type="button" class="min-graph" data-min="down" data-card="down-card">Minimize</button>
+        </div>
         <div class="big" id="down-now">—</div>
         <canvas class="chart" id="down-chart"></canvas>
       </div>
-      <div class="card figure">
-        <h2>Network Upload</h2>
+      <div class="card figure" id="up-card">
+        <div class="figure-head">
+          <h2>Network Upload</h2>
+          <button type="button" class="min-graph" data-min="up" data-card="up-card">Minimize</button>
+        </div>
         <div class="big" id="up-now">—</div>
         <canvas class="chart" id="up-chart"></canvas>
       </div>
     </div>
-    <section class="card">
+    <section class="card" id="hist-card">
       <div class="hist-head">
         <div class="tools">
           <h2 id="hist-title">All devices</h2>
+          <button type="button" class="min-graph" data-min="hist" data-card="hist-card">Minimize</button>
           <button type="button" id="show-all" class="active">All devices</button>
           <button type="button" data-range="1h" class="active">1 hour</button>
           <button type="button" data-range="24h">24 hours</button>
@@ -678,8 +692,13 @@ function renderLive() {
   const hostInput = $("deco-host");
   if (hostInput && live.host && document.activeElement !== hostInput) hostInput.value = live.host;
   const status = $("status");
+  const stopped = live.server_running === false;
+  $("server-stop").hidden = stopped;
+  $("server-start").hidden = !stopped;
   if (live.needs_password) {
     status.textContent = "Waiting for the Deco password.";
+  } else if (stopped) {
+    status.textContent = "Server stopped.";
   } else if (live.error) {
     status.textContent = "Collector problem.";
   } else if (!live.updated) {
@@ -704,13 +723,15 @@ function renderLive() {
     }
   }
   const update = live.update || {};
-  const updateButton = $("install-update");
-  const offerUpdate = update.latest && update.latest !== update.current && (update.status === "available" || update.status === "error");
-  if (updateButton) updateButton.hidden = !offerUpdate;
+  $("download-update").hidden = update.status !== "available";
+  $("install-update").hidden = update.status !== "downloaded";
   let banner = live.error || "";
   if (!banner && update.status === "downloading") banner = `Downloading update ${update.latest}…`;
-  if (!banner && update.status === "restarting") banner = `Installing update ${update.latest}. The page will reconnect in a moment.`;
+  if (!banner && update.status === "downloaded") banner = `Update ${update.latest} is downloaded. Installing it restarts the server.`;
+  if (!banner && update.status === "restarting") banner = `Installing update ${update.latest}. The server is restarting.`;
   if (!banner && update.status === "available") banner = `Update ${update.latest} is available.`;
+  if (!banner && update.status === "uptodate") banner = "DecoMonitor is up to date.";
+  if (!banner && update.status === "source" && update.error) banner = update.error;
   if (!banner && update.status === "error" && update.error) banner = update.error;
   showBanner(banner);
   if (live.needs_password) return;
@@ -1039,9 +1060,51 @@ document.querySelectorAll("[data-sort]").forEach((button) => {
     renderLive();
   });
 });
-$("install-update").addEventListener("click", async () => {
-  $("install-update").disabled = true;
-  await fetch("/api/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+async function postJson(path, body) {
+  await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+}
+$("server-stop").addEventListener("click", () => postJson("/api/server", { action: "stop" }));
+$("server-start").addEventListener("click", () => postJson("/api/server", { action: "start" }));
+$("check-update").addEventListener("click", () => postJson("/api/update-check"));
+$("download-update").addEventListener("click", () => {
+  const version = (lastLive && lastLive.update && lastLive.update.latest) || "the update";
+  if (!confirm(`Download update ${version}?`)) return;
+  postJson("/api/update-download");
+});
+$("install-update").addEventListener("click", () => {
+  const version = (lastLive && lastLive.update && lastLive.update.latest) || "the update";
+  if (!confirm(`Install update ${version}? The server will restart.`)) return;
+  postJson("/api/update-install");
+});
+const minimized = { down: false, up: false, hist: false };
+try {
+  const savedMin = JSON.parse(localStorage.getItem("bw-min") || "{}");
+  for (const key of ["down", "up", "hist"]) minimized[key] = !!savedMin[key];
+} catch (err) {
+  /* keep the graphs open */
+}
+function applyMinimized() {
+  document.querySelectorAll("[data-min]").forEach((button) => {
+    const key = button.dataset.min;
+    const card = document.getElementById(button.dataset.card);
+    if (card) card.classList.toggle("minimized", !!minimized[key]);
+    button.textContent = minimized[key] ? "Show graph" : "Minimize";
+  });
+}
+applyMinimized();
+document.querySelectorAll("[data-min]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const key = button.dataset.min;
+    minimized[key] = !minimized[key];
+    localStorage.setItem("bw-min", JSON.stringify(minimized));
+    applyMinimized();
+    renderLive();
+    renderHist();
+  });
 });
 $("clear-data").addEventListener("click", async () => {
   if (!confirm("Clear all saved bandwidth and usage data from database? This cannot be undone.")) return;
