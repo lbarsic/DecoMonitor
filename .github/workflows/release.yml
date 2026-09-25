@@ -21,10 +21,13 @@ jobs:
       - name: Stamp the build version
         shell: pwsh
         run: |
-          if ($env:GITHUB_REF -like "refs/tags/*") {
+          if ($env:GITHUB_REF -like "refs/tags/v*") {
             $version = $env:GITHUB_REF_NAME
           } else {
-            $version = "b-$env:GITHUB_SHA"
+            $version = (Get-Content version.txt -Raw).Trim()
+          }
+          if ($version -notmatch "^v\d+\.\d+\.\d+$") {
+            throw "version.txt must look like v1.0.1"
           }
           Set-Content -Path version.txt -Value $version -NoNewline -Encoding ascii
           Add-Content -Path $env:GITHUB_ENV -Value "DECOMONITOR_VERSION=$version" -Encoding utf8
@@ -49,3 +52,9 @@ jobs:
             gh release upload $tag $named dist/DecoMonitor.exe --repo $env:GITHUB_REPOSITORY --clobber
           }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $old = gh release list --repo $env:GITHUB_REPOSITORY --limit 100 --json tagName | ConvertFrom-Json
+          foreach ($item in $old) {
+            if ($item.tagName -like "b-*") {
+              gh release delete $item.tagName --repo $env:GITHUB_REPOSITORY --yes --cleanup-tag
+            }
+          }

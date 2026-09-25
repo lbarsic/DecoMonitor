@@ -6,7 +6,7 @@ The Deco owner password stays in `secret.txt` on that PC. It is never sent to TP
 
 ## Windows
 
-Download the latest `DecoMonitor-<version>.exe` from the [releases page](https://github.com/lbarsic/DecoMonitor/releases/latest) and open it.
+Download the latest release, named like `DecoMonitor-v1.0.1.exe`, from the [releases page](https://github.com/lbarsic/DecoMonitor/releases/latest) and open it.
 
 Approve the administrator prompt. The app is copied to `C:\ProgramData\DecoMonitor` and a startup task named `DecoMonitor` runs it at every boot, before anyone logs on. The dashboard opens at http://127.0.0.1:8787. The first page asks for the Deco address (usually `192.168.68.1`) and the owner TP-Link ID password.
 
@@ -20,7 +20,7 @@ To remove the startup task later, open an elevated PowerShell and run:
 
 That removes the task and leaves the saved history and password in `C:\ProgramData\DecoMonitor`.
 
-A push to `main` builds `DecoMonitor-<version>.exe` and publishes it as the latest GitHub release. An installed copy looks for a release about 30 seconds after it starts, and then about every 12 hours. **Check for updates** looks immediately. The page reports a newer release and waits. **Download update** asks before downloading. **Install update** asks again and warns that the server will restart. Saved history and the password stay in place. Replacing the running program cannot be done without that restart.
+`version.txt` is the release name, such as `v1.0.1`. A push to `main` publishes that version as `DecoMonitor-v1.0.1.exe`. Change `version.txt` to `v1.0.2` before the push when installed copies should be offered a new update. An installed copy looks for a release about 30 seconds after it starts, and then about every 12 hours. **Check for updates** looks immediately. The page reports a newer release and waits. **Download update** asks before downloading. **Install update** asks again and warns that the server will restart. Saved history and the password stay in place. Replacing the running program cannot be done without that restart.
 
 ## Linux
 
