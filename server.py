@@ -715,6 +715,10 @@ class Store:
         self._reported = {}
         self._unstick_logged = set()
 
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
     def meta_interval(self) -> float:
         return float(POLL_FAST)
 
@@ -1500,6 +1504,10 @@ class Service:
         _lock_secret()
         self._wake.set()
 
+    def close(self) -> None:
+        with self._lock:
+            self.store.close()
+
     def status(self) -> dict:
         live = self.store.live() if not self.needs_password() else {
             "totals": {"down_mbps": 0, "up_mbps": 0, "down_deco": "0 KB/s", "up_deco": "0 KB/s"},
@@ -1520,6 +1528,7 @@ class Service:
             "speed_unit": self.speed_unit,
             "host": self.host,
             "zero_streak": self.zero_streak,
+            "update": update_status(),
             **live,
         }
 
@@ -1758,6 +1767,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "Expected JSON"}, 400)
             return
         try:
+            if parsed.path == "/api/update":
+                threading.Thread(target=lambda: check_for_update(apply=True), name="update-now", daemon=True).start()
+                self._send_json({"ok": True})
+                return
             if parsed.path == "/api/login":
                 host = str(payload.get("host") or "").strip()
                 if host:
@@ -2013,20 +2026,199 @@ def uninstall_windows() -> None:
     _message(f"Startup task removed. Saved data remains in {DATA}")
 
 
+UPDATE_REPO = "lbarsic/DecoMonitor"
+UPDATE_CHECK_SECONDS = 30 * 60
+UPDATE_FIRST_DELAY = 30
+_update_lock = threading.Lock()
+_update_info = {"current": "", "latest": "", "status": "", "error": ""}
+_httpd: ThreadingHTTPServer | None = None
+
+
+def app_version() -> str:
+    try:
+        text = (BUNDLE / "version.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "dev"
+    return text or "dev"
+
+
+def update_status() -> dict:
+    with _update_lock:
+        return dict(_update_info)
+
+
+def _github_json(url: str) -> dict:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "DecoMonitor",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read().decode())
+    if not isinstance(payload, dict):
+        raise DecoError("GitHub returned an unexpected update response")
+    return payload
+
+
+def _allowed_download(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host == "github.com" or host.endswith(".githubusercontent.com")
+
+
+def _set_update(**fields: str) -> None:
+    with _update_lock:
+        _update_info.update(fields)
+
+
+def check_for_update(apply: bool = True) -> None:
+    if not getattr(sys, "frozen", False):
+        return
+    current = app_version()
+    if not current or current == "dev":
+        return
+    with _update_lock:
+        if _update_info["status"] in {"downloading", "restarting"}:
+            return
+        _update_info["current"] = current
+    try:
+        release = _github_json(f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest")
+    except Exception as exc:
+        log.warning("update check failed: %s", exc)
+        _set_update(status="error", error="Could not reach GitHub to look for an update.")
+        return
+    latest = str(release.get("tag_name") or "")
+    _set_update(current=current, latest=latest, error="")
+    if not latest or latest == current:
+        _set_update(status="")
+        return
+    if not apply:
+        _set_update(status="available")
+        return
+    with _update_lock:
+        if _update_info["status"] in {"downloading", "restarting"}:
+            return
+        _update_info["status"] = "downloading"
+        _update_info["latest"] = latest
+        _update_info["error"] = ""
+    _download_and_apply(release)
+
+
+def _download_and_apply(release: dict) -> None:
+    asset = next(
+        (item for item in release.get("assets") or [] if item.get("name") == "DecoMonitor.exe"),
+        None,
+    )
+    if not asset:
+        _set_update(status="error", error="The latest GitHub release has no DecoMonitor.exe.")
+        return
+    url = str(asset.get("browser_download_url") or "")
+    if not _allowed_download(url):
+        _set_update(status="error", error="The update download address was not on GitHub.")
+        return
+    dest = DATA / "DecoMonitor-update.exe"
+    partial = DATA / "DecoMonitor-update.exe.part"
+    _set_update(status="downloading", error="")
+    digest = str(asset.get("digest") or "")
+    hasher = hashlib.sha256()
+    size = 0
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "DecoMonitor", "Accept": "application/octet-stream"})
+        with urllib.request.urlopen(request, timeout=300) as response, partial.open("wb") as handle:
+            while True:
+                chunk = response.read(256 * 1024)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+                handle.write(chunk)
+                size += len(chunk)
+        expected = digest.split(":", 1)[1].strip().lower() if digest.startswith("sha256:") else ""
+        if expected and hasher.hexdigest().lower() != expected:
+            raise DecoError("The downloaded update did not match GitHub's checksum.")
+        if size < 1_000_000:
+            raise DecoError("The downloaded update was too small.")
+        partial.replace(dest)
+    except Exception as exc:
+        log.warning("update download failed: %s", exc)
+        partial.unlink(missing_ok=True)
+        _set_update(status="error", error="The update download failed. It will be tried again later.")
+        return
+    _set_update(status="restarting", error="")
+    flags = 0x00000008 | 0x00000200 | 0x08000000
+    subprocess.Popen(
+        [str(dest), "--apply-update"],
+        creationflags=flags,
+        close_fds=True,
+    )
+    threading.Thread(target=_stop_for_update, name="update-stop", daemon=True).start()
+
+
+def _stop_for_update() -> None:
+    time.sleep(2)
+    if _httpd is not None:
+        _httpd.shutdown()
+
+
+def apply_update() -> None:
+    if not getattr(sys, "frozen", False):
+        return
+    source = Path(sys.executable)
+    target = DATA / "DecoMonitor.exe"
+    copied = False
+    for _ in range(60):
+        if _port_free(PORT):
+            try:
+                shutil.copy2(source, target)
+                copied = True
+                break
+            except OSError:
+                pass
+        time.sleep(0.5)
+    if not copied:
+        log.error("update could not replace %s", target)
+        return
+    _run_schtasks(["/End", "/TN", TASK_NAME])
+    _run_schtasks(["/Run", "/TN", TASK_NAME])
+
+
+def _update_loop() -> None:
+    time.sleep(UPDATE_FIRST_DELAY)
+    while True:
+        try:
+            check_for_update(apply=True)
+        except Exception:
+            log.exception("update check failed")
+        for _ in range(UPDATE_CHECK_SECONDS):
+            time.sleep(1)
+            if update_status()["status"] == "restarting":
+                return
+
+
 def run_server() -> None:
-    global SERVICE
+    global SERVICE, _httpd
     SERVICE = Service()
     threading.Thread(target=SERVICE.loop, name="poller", daemon=True).start()
+    if getattr(sys, "frozen", False):
+        threading.Thread(target=_update_loop, name="update", daemon=True).start()
     try:
         server = ThreadingHTTPServer((HOST, PORT), Handler)
     except OSError as exc:
         log.error("port %s is already in use (%s); leaving the existing collector running", PORT, exc)
         return
+    _httpd = server
     log.info("listening on http://%s:%s", HOST, PORT)
     server.serve_forever()
+    try:
+        SERVICE.close()
+    except Exception:
+        log.exception("could not close the database")
 
 
 def main() -> None:
+    if "--apply-update" in sys.argv:
+        apply_update()
+        return
     if getattr(sys, "frozen", False) and "--service" not in sys.argv:
         if "--uninstall" in sys.argv:
             uninstall_windows()

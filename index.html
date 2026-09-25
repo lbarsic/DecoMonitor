@@ -142,6 +142,7 @@
     <div class="sub" id="status">Connecting to the Deco…</div>
   </div>
   <div class="header-controls">
+    <button type="button" id="install-update" hidden>Install update</button>
     <button type="button" id="clear-data">Clear data</button>
     <div class="unit-pick" role="group" aria-label="Speed unit">
       <button type="button" data-unit="bytes">MB/s</button>
@@ -702,7 +703,15 @@ function renderLive() {
       status.append(node);
     }
   }
+  const update = live.update || {};
+  const updateButton = $("install-update");
+  const offerUpdate = update.latest && update.latest !== update.current && (update.status === "available" || update.status === "error");
+  if (updateButton) updateButton.hidden = !offerUpdate;
   let banner = live.error || "";
+  if (!banner && update.status === "downloading") banner = `Downloading update ${update.latest}…`;
+  if (!banner && update.status === "restarting") banner = `Installing update ${update.latest}. The page will reconnect in a moment.`;
+  if (!banner && update.status === "available") banner = `Update ${update.latest} is available.`;
+  if (!banner && update.status === "error" && update.error) banner = update.error;
   showBanner(banner);
   if (live.needs_password) return;
   keepScroll(() => renderLiveBody(live));
@@ -1029,6 +1038,10 @@ document.querySelectorAll("[data-sort]").forEach((button) => {
     markSortHeaders();
     renderLive();
   });
+});
+$("install-update").addEventListener("click", async () => {
+  $("install-update").disabled = true;
+  await fetch("/api/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
 });
 $("clear-data").addEventListener("click", async () => {
   if (!confirm("Clear all saved bandwidth and usage data from database? This cannot be undone.")) return;

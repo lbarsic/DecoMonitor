@@ -20,6 +20,8 @@ To remove the startup task later, open an elevated PowerShell and run:
 
 That removes the task and leaves the saved history and password in `C:\ProgramData\DecoMonitor`.
 
+A push to `main` builds a new exe and publishes it as the latest GitHub release. Each installed copy checks that release about 30 seconds after it starts, and then about every 30 minutes. When the release is newer, the dashboard says so, downloads the exe, and restarts itself. Saved history and the password stay in place. The copy from before this updater existed has to be downloaded once by hand; after that it follows new releases on its own.
+
 ## Linux
 
 Boot recording (no login required):

@@ -2,6 +2,7 @@ name: Release
 
 on:
   push:
+    branches: [main]
     tags:
       - "v*"
   workflow_dispatch:
@@ -17,6 +18,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Stamp the build version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like "refs/tags/*") {
+            $version = $env:GITHUB_REF_NAME
+          } else {
+            $version = "b-$env:GITHUB_SHA"
+          }
+          Set-Content -Path version.txt -Value $version -NoNewline -Encoding ascii
+          Add-Content -Path $env:GITHUB_ENV -Value "DECOMONITOR_VERSION=$version" -Encoding utf8
       - name: Build DecoMonitor.exe
         run: |
           python -m pip install --upgrade pip
@@ -25,4 +36,14 @@ jobs:
       - name: Publish the exe
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/DecoMonitor.exe --title "${{ github.ref_name }}" --notes "Open DecoMonitor.exe and approve the administrator prompt. It records bandwidth from boot and opens http://127.0.0.1:8787/."
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $tag = $env:DECOMONITOR_VERSION
+          gh release view $tag --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag dist/DecoMonitor.exe --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title $tag --notes "Open DecoMonitor.exe and approve the administrator prompt. Installed copies download newer releases on their own."
+          } else {
+            gh release upload $tag dist/DecoMonitor.exe --repo $env:GITHUB_REPOSITORY --clobber
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
