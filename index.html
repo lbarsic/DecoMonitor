@@ -62,6 +62,11 @@
     padding: 10px 12px;
     margin-top: 12px;
   }
+  .banner.info {
+    background: #15283a;
+    border-color: #2c6494;
+    color: #d7e8f8;
+  }
   .login { max-width: 460px; }
   .login p { color: var(--muted); }
   label { display: block; margin: 12px 0 6px; color: var(--muted); }
@@ -409,8 +414,9 @@ function drawAxes(ctx, xOf, yOf, t0, t1, y, pad, w, h) {
   }
   ctx.textAlign = "left";
 }
-function showBanner(text) {
+function showBanner(text, kind) {
   const el = $("banner");
+  el.classList.toggle("info", kind === "info" && !!text);
   el.style.display = text ? "block" : "none";
   el.textContent = text || "";
 }
@@ -726,14 +732,22 @@ function renderLive() {
   $("download-update").hidden = update.status !== "available";
   $("install-update").hidden = update.status !== "downloaded";
   let banner = live.error || "";
+  let bannerKind = banner ? "error" : "";
   if (!banner && update.status === "downloading") banner = `Downloading update ${update.latest}…`;
   if (!banner && update.status === "downloaded") banner = `Update ${update.latest} is downloaded. Installing it restarts the server.`;
   if (!banner && update.status === "restarting") banner = `Installing update ${update.latest}. The server is restarting.`;
   if (!banner && update.status === "available") banner = `Update ${update.latest} is available.`;
-  if (!banner && update.status === "uptodate") banner = "DecoMonitor is up to date.";
-  if (!banner && update.status === "source" && update.error) banner = update.error;
   if (!banner && update.status === "error" && update.error) banner = update.error;
-  showBanner(banner);
+  if (!banner && (update.status === "uptodate" || update.status === "source")) {
+    const notice = update.status === "uptodate" ? "DecoMonitor is up to date." : (update.error || "");
+    if (notice && updateNoticeWait) {
+      updateNoticeWait = false;
+      updateNoticeUntil = Date.now() + 5000;
+    }
+    if (notice && Date.now() < updateNoticeUntil) banner = notice;
+  }
+  if (banner && !bannerKind) bannerKind = "info";
+  showBanner(banner, bannerKind);
   if (live.needs_password) return;
   keepScroll(() => renderLiveBody(live));
 }
@@ -1069,7 +1083,13 @@ async function postJson(path, body) {
 }
 $("server-stop").addEventListener("click", () => postJson("/api/server", { action: "stop" }));
 $("server-start").addEventListener("click", () => postJson("/api/server", { action: "start" }));
-$("check-update").addEventListener("click", () => postJson("/api/update-check"));
+let updateNoticeWait = false;
+let updateNoticeUntil = 0;
+$("check-update").addEventListener("click", () => {
+  updateNoticeWait = true;
+  updateNoticeUntil = 0;
+  postJson("/api/update-check");
+});
 $("download-update").addEventListener("click", () => {
   const version = (lastLive && lastLive.update && lastLive.update.latest) || "the update";
   if (!confirm(`Download update ${version}?`)) return;
